@@ -8,9 +8,47 @@ import sys
 
 from euphonogenizer import titleformat as tf
 
+from typing import List
+
 from PyQt5 import QtCore
 from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex, QUrl
+from PyQt5.QtGui import QPalette
 from PyQt5.QtWidgets import *
+
+
+disabledPalette = QPalette()
+disabledPalette.setColor(QPalette.Base, Qt.lightGray)
+
+
+class MutagenFileProxy:
+  __slots__ = 'mutagen_file'
+
+  def __init__(self, mutagen_file):
+    self.mutagen_file = mutagen_file
+
+  def __getattr__(self, attr):
+    if attr in (
+        'get', 'mutagen_file', '__getitem__', '__setitem__', '__delitem__'):
+      return object.__getattribute__(self, attr)
+    return getattr(self.mutagen_file, attr)
+
+  def get(self, key, default=None):
+    item = self.mutagen_file.get(key, default)
+    if isinstance(item, list):
+      return item[0]
+    return item
+
+  def __getitem__(self, key):
+    item = self.mutagen_file[key]
+    if isinstance(item, list):
+      return item[0]
+    return item
+
+  def __setitem__(self, key, value):
+    self.mutagen_file[key] = value
+
+  def __delitem__(self, key):
+    del self.mutagen_file[key]
 
 
 playlistAllowedMimeTypes = [
@@ -19,25 +57,35 @@ playlistAllowedMimeTypes = [
 ]
 
 
+class PlaylistColumn:
+  __slots__ = 'name', 'defaultWidth', 'fmt', 'tfc'
+
+  def __init__(self, name, defaultWidth, fmt):
+    self.name = name
+    self.defaultWidth = defaultWidth
+    self.fmt = fmt
+    self.tfc = tf.compile(fmt)
+
+
 class PlaylistModel(QAbstractTableModel):
-  def __init__(self, columnFormats, tracks, parent=None):
+  def __init__(self, columns, tracks, parent=None):
     super().__init__(parent)
-    self.columnFormats = columnFormats
+    self.columns = columns
     self.tracks = tracks
 
   def rowCount(self, parent=QModelIndex()):
     return len(self.tracks)
 
   def columnCount(self, parent=QModelIndex()):
-    return len(self.columnFormats)
+    return len(self.columns)
 
   def data(self, index, role):
     if index.isValid() and role == Qt.DisplayRole:
-      return self.columnFormats[index.column()][2](self.tracks[index.row()])
+      return self.columns[index.column()].tfc(self.tracks[index.row()])
 
   def headerData(self, section, orientation, role):
     if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-      return self.columnFormats[section][0]
+      return self.columns[section].name
 
   def insertTrack(self, row, track):
     if row < 0:
@@ -49,7 +97,7 @@ class PlaylistModel(QAbstractTableModel):
   def insertTrackPath(self, row, track_path):
     track = mutagen.File(track_path, easy=True)
     if track:
-      self.insertTrack(row, track)
+      self.insertTrack(row, MutagenFileProxy(track))
     else:
       print(f'Failed to insert file "{track_path}"')
 
@@ -137,30 +185,153 @@ def is_contiguous(seq):
   return True
 
 
-class PlaylistTableView(QTableView):
-  def __init__(self, playlist: PlaylistModel, parent=None):
+def set_basic_table_styles(
+    tableView: QTableView, hh: QHeaderView, vh: QHeaderView) -> None:
+  tableView.setShowGrid(False)
+  tableView.setWordWrap(False)
+  tableView.setAlternatingRowColors(True)
+  tableView.setSelectionBehavior(QAbstractItemView.SelectRows)
+  hh.setHighlightSections(False)
+  hh.setDefaultAlignment(Qt.AlignLeft)
+  vh.setSectionResizeMode(QHeaderView.ResizeToContents)
+
+
+class ColumnConfigurationModel(QAbstractTableModel):
+  def __init__(self, columnsToConfigure: List[PlaylistColumn], parent):
     super().__init__(parent)
-    self.playlist = playlist
-    self.setModel(playlist)
-    self.setShowGrid(False)
-    self.setWordWrap(False)
-    self.setAlternatingRowColors(True)
-    self.setSelectionBehavior(QAbstractItemView.SelectRows)
+    self.columnsToConfigure = columnsToConfigure
+
+  def rowCount(self, parent=QModelIndex()):
+    return len(self.columnsToConfigure)
+
+  def columnCount(self, parent=QModelIndex()):
+    return 3
+
+  def data(self, index, role):
+    if index.isValid() and role == Qt.DisplayRole:
+      col = index.column()
+      if col == 0:
+        return self.columnsToConfigure[index.row()].name
+      elif col == 1:
+        return self.columnsToConfigure[index.row()].defaultWidth
+      elif col == 2:
+        return self.columnsToConfigure[index.row()].fmt
+
+  def headerData(self, section, orientation, role):
+    if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+      if section == 0:
+        return 'Name'
+      elif section == 1:
+        return 'Width'
+      elif section == 2:
+        return 'Format'
+
+
+class ColumnConfigurationTableView(QTableView):
+  def __init__(self, columns, parent):
+    super().__init__(parent)
+    self.columns = columns
+    self.columnsModel = ColumnConfigurationModel(columns, self)
+    self.setModel(self.columnsModel)
+
+    hh = self.horizontalHeader()
+    vh = self.verticalHeader()
+
+    set_basic_table_styles(self, hh, vh)
+
+    hh.setStretchLastSection(True)
+
+
+class ConfigureColumnsDialog(QDialog):
+  def __init__(self, columns, parent):
+    super().__init__(parent)
+    self.columns = columns
+
+    self.setModal(False)
+    self.setWindowTitle('Configure Columns')
+    self.resize(640, 480)
+
+    self.layout = QGridLayout()
+
+    self.columnsTableView = ColumnConfigurationTableView(columns, self)
+
+    selectionModel = self.columnsTableView.selectionModel()
+    selectionModel.currentRowChanged.connect(self.onCurrentRowChanged)
+
+    self.layout.addWidget(self.columnsTableView, 1, 1, 2, 4)
+
+    self.columnNameLabel = QLabel('Name:', self)
+    self.columnNameTextBox = QLineEdit(self)
+    self.columnWidthLabel = QLabel('Width:', self)
+    self.columnWidthTextBox = QLineEdit(self)
+    self.columnFormatLabel = QLabel('Format:', self)
+    self.columnFormatTextBox = QLineEdit(self)
+
+    self.layout.addWidget(self.columnNameLabel, 3, 1)
+    self.layout.addWidget(self.columnNameTextBox, 3, 2)
+    self.layout.addWidget(self.columnWidthLabel, 3, 3)
+    self.layout.addWidget(self.columnWidthTextBox, 3, 4)
+    self.layout.addWidget(self.columnFormatLabel, 4, 1, 1, 1)
+    self.layout.addWidget(self.columnFormatTextBox, 4, 2, 1, 3)
+
+    self.previewLabel = QLabel('Preview:', self)
+    self.previewTextBox = QLineEdit(self)
+    self.previewTextBox.setReadOnly(True)
+    self.previewTextBox.setPalette(disabledPalette)
+
+    self.layout.addWidget(self.previewLabel, 5, 1, 1, 1)
+    self.layout.addWidget(self.previewTextBox, 5, 2, 1, 3)
+
+    self.setLayout(self.layout)
+
+  def onCurrentRowChanged(self, current, previous):
+    col = self.columns[current.row()]
+    self.columnNameTextBox.setText(col.name)
+    self.columnWidthTextBox.setText(str(col.defaultWidth))
+    self.columnFormatTextBox.setText(col.fmt)
+
+
+class PlaylistTableView(QTableView):
+  def __init__(self, parent=None):
+    super().__init__(parent)
+    self.columns = [
+        PlaylistColumn('Track', 30, '%track%'),
+        PlaylistColumn('Title', 180, '%title%'),
+        PlaylistColumn('Artist', 180, '%artist%'),
+        PlaylistColumn('Album', 180, '%album%'),
+      ]
+
+    self.playlist = PlaylistModel(self.columns, [])
+    self.setModel(self.playlist)
+
+    hh = self.horizontalHeader()
+    vh = self.verticalHeader()
+
+    set_basic_table_styles(self, hh, vh)
+
     self.setSelectionMode(QAbstractItemView.ExtendedSelection)
     self.setAcceptDrops(True)
     self.setDropIndicatorShown(True)
     self.setDragDropMode(QAbstractItemView.DragDrop)
-    hh = self.horizontalHeader()
-    hh.setHighlightSections(False)
-    hh.setDefaultAlignment(Qt.AlignLeft)
-    vh = self.verticalHeader()
-    vh.setSectionResizeMode(QHeaderView.ResizeToContents)
+
+    hh.setContextMenuPolicy(Qt.CustomContextMenu)
+    hh.customContextMenuRequested.connect(self.enactColumnContextMenu)
+
+    ccm = QMenu()
+    self.addColumn = ccm.addAction('Add Column...', lambda: None)
+    self.columnContextMenu = ccm
+
     vh.setSectionsMovable(True)
     vh.setDragEnabled(True)
     vh.setDragDropMode(QAbstractItemView.InternalMove)
     vh.hide()
-    for i, each in enumerate(playlist.columnFormats):
-      self.setColumnWidth(i, each[1])
+
+    for i, each in enumerate(self.playlist.columns):
+      self.setColumnWidth(i, each.defaultWidth)
+
+  def enactColumnContextMenu(self, pos):
+    self.columnContextMenu.exec_(self.mapToGlobal(pos))
+
 
   def dropEvent(self, event):
     if not event.isAccepted() and event.source() == self:
@@ -223,7 +394,7 @@ class NowPlayingSlider(QSlider):
 
 
 class PlayerFileMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
     self.menu = menu
     self.open = menu.addAction('Open...', lambda: None)
     self.openDisc = menu.addAction('Open Disc...', lambda: None)
@@ -236,29 +407,37 @@ class PlayerFileMenuContainer:
 
 
 class PlayerEditMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
     self.menu = menu
     self.undo = menu.addAction('Undo', lambda: None)
     self.redo = menu.addAction('Redo', lambda: None)
 
 
 class PlayerViewMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
+    self.mainWindow = mainWindow
     self.menu = menu
+    self.configureColumns = menu.addAction(
+        'Configure Columns...', self.onConfigureColumns)
+
+  def onConfigureColumns(self):
+    configureColumnsDialog = ConfigureColumnsDialog(
+        self.mainWindow.playlistView.columns, self.mainWindow)
+    configureColumnsDialog.show()
 
 
 class PlayerPlaybackMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
     self.menu = menu
 
 
 class PlayerLibraryMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
     self.menu = menu
 
 
 class PlayerHelpMenuContainer:
-  def __init__(self, menu):
+  def __init__(self, mainWindow, menu):
     self.menu = menu
     self.checkForUpdates = menu.addAction('Check for Updates...', lambda: None)
     self.creditsSeparator = menu.addSeparator()
@@ -266,14 +445,20 @@ class PlayerHelpMenuContainer:
 
 
 class PlayerMenuBarContainer:
-  def __init__(self, menuBar):
+  def __init__(self, mainWindow, menuBar):
     self.menuBar = menuBar
-    self.file = PlayerFileMenuContainer(menuBar.addMenu('File'))
-    self.edit = PlayerEditMenuContainer(menuBar.addMenu('Edit'))
-    self.view = PlayerViewMenuContainer(menuBar.addMenu('View'))
-    self.playback = PlayerPlaybackMenuContainer(menuBar.addMenu('Playback'))
-    self.library = PlayerLibraryMenuContainer(menuBar.addMenu('Library'))
-    self.help = PlayerHelpMenuContainer(menuBar.addMenu('Help'))
+    self.file = PlayerFileMenuContainer(
+        mainWindow, menuBar.addMenu('File'))
+    self.edit = PlayerEditMenuContainer(
+        mainWindow, menuBar.addMenu('Edit'))
+    self.view = PlayerViewMenuContainer(
+        mainWindow, menuBar.addMenu('View'))
+    self.playback = PlayerPlaybackMenuContainer(
+        mainWindow, menuBar.addMenu('Playback'))
+    self.library = PlayerLibraryMenuContainer(
+        mainWindow, menuBar.addMenu('Library'))
+    self.help = PlayerHelpMenuContainer(
+        mainWindow, menuBar.addMenu('Help'))
 
 
 def fetch_meta(obj, field):
@@ -286,17 +471,11 @@ class PlayerMainWindow(QMainWindow):
   def __init__(self):
     super().__init__()
     self.setWindowTitle('HNL')
-    self.menuBarContainer = PlayerMenuBarContainer(self.menuBar())
+    self.menuBarContainer = PlayerMenuBarContainer(self, self.menuBar())
     self.playerControlsToolbar = self.buildPlayerControlsToolbar()
     self.resize(800, 600)
     self.layout = QVBoxLayout()
-    self.playlist = PlaylistModel([
-        ('Track', 30, lambda x: fetch_meta(x, 'tracknumber')),
-        ('Title', 180, lambda x: fetch_meta(x, 'title')),
-        ('Artist', 180, lambda x: fetch_meta(x, 'artist')),
-        ('Album', 180, lambda x: fetch_meta(x, 'album')),
-      ], [])
-    self.playlistView = PlaylistTableView(self.playlist)
+    self.playlistView = PlaylistTableView(self)
     self.layout.addWidget(self.playlistView)
     self.slider = NowPlayingSlider()
     self.layout.addWidget(self.slider)
@@ -320,7 +499,7 @@ class PlayerMainWindow(QMainWindow):
 
 
 def main():
-  app = QApplication([])
+  app = QApplication(sys.argv)
   main_window = PlayerMainWindow()
   main_window.show()
   sys.exit(app.exec_())
