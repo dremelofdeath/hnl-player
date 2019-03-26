@@ -6,6 +6,7 @@ import copy
 import mutagen
 import os.path
 import sys
+import traceback
 
 from euphonogenizer import titleformat as tf
 
@@ -17,8 +18,100 @@ from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 
 
-class HNLInternalError(Exception):
+class FatalError(Exception):
   pass
+
+
+class BenignError(Exception):
+  pass
+
+
+class InvalidActionError(BenignError):
+  pass
+
+
+def get_standard_icon(
+    style: QStyle, sp: QStyle.StandardPixmap,
+    minimumWidth: int, parent: QWidget = None) -> QLabel:
+  si = style.standardIcon(sp)
+  icon = QLabel(parent)
+  i = 0
+  avail = si.availableSizes()
+  l = len(avail)
+  while i < l and avail[i].width() < minimumWidth:
+    i += 1
+  icon.setPixmap(si.pixmap(avail[i]))
+  return icon
+
+
+class InternalErrorDialog(QDialog):
+  def __init__(self, title, msg, parent=None):
+    super().__init__(parent)
+
+    self.setWindowTitle(title)
+    self.resize(320, 120)
+    self.setWindowFlags(
+        Qt.Dialog | Qt.CustomizeWindowHint
+        | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+
+    self.gridLayout = QGridLayout(self)
+    self.gridLayout.setSpacing(8)
+
+    self.icon = get_standard_icon(
+        self.style(), QStyle.SP_MessageBoxCritical, 32, self)
+
+    self.msg = QLabel(f'An unexpected error occurred.\n\n{msg}', self)
+
+    self.msg.setWordWrap(True)
+    self.msg.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+    self.gridLayout.addWidget(self.icon, 0, 0, Qt.AlignLeft | Qt.AlignTop)
+    self.gridLayout.addWidget(self.msg, 0, 1, 1, 3)
+    self.gridLayout.setColumnStretch(1, 1)
+
+    self.showDetailsButton = QPushButton('Show Details', self)
+    self.okButton = QPushButton('OK', self)
+
+    self.gridLayout.addWidget(
+        self.showDetailsButton, 1, 0, 1, 2, Qt.AlignLeft | Qt.AlignBottom)
+    self.gridLayout.addWidget(
+        self.okButton, 1, 2, 1, 2, Qt.AlignRight | Qt.AlignBottom)
+
+    self.okButton.clicked.connect(self.accept)
+    self.showDetailsButton.clicked.connect(lambda: self.done(2))
+
+
+class ShowErrorDetailsDialog(QDialog):
+  def __init__(self, title, msg, parent=None):
+    super().__init__(parent)
+
+    self.setWindowTitle(title)
+    self.resize(520, 390)
+    self.setWindowFlags(
+        Qt.Dialog | Qt.CustomizeWindowHint
+        | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+
+    self.gridLayout = QVBoxLayout(self)
+
+    self.detailsBox = QPlainTextEdit(msg, self)
+    self.okButton = QPushButton('OK', self)
+
+    self.detailsBox.setReadOnly(True)
+    self.okButton.clicked.connect(self.accept)
+
+    self.gridLayout.addWidget(self.detailsBox)
+    self.gridLayout.addWidget(self.okButton, 0, Qt.AlignCenter)
+
+
+def hnl_exception_hook(etype, value, tb):
+  dialog = InternalErrorDialog('Internal Error', str(value))
+  if dialog.exec() == 2:
+    dialog = ShowErrorDetailsDialog('Error Details',
+        ''.join(traceback.format_exception(etype, value, tb)))
+    dialog.exec()
+
+
+sys.excepthook = hnl_exception_hook
 
 
 disabledPalette = QPalette()
@@ -446,7 +539,7 @@ class ColumnConfigurationLayout(QGridLayout):
 
   def onDeleteButtonClicked(self, checked):
     if len(self.columns) <= 1:
-      raise HNLInternalError('Attempted to delete the only remaining column.')
+      raise InvalidActionError('Attempted to delete the only remaining column.')
 
     index = self.selectionModel.currentIndex()
     if index.isValid():
